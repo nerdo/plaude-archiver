@@ -10,6 +10,8 @@ enum APIError: Error, CustomStringConvertible {
 struct PlaudAPI {
     var userToken: String
     var host: String
+    // The network session; tests pass one whose requests a stub answers.
+    var session: URLSession = .shared
 
     private func decodeEnvelope(_ resp: HTTPURLResponse, _ body: Data) throws -> [String: Any] {
         var text = String(data: body, encoding: .utf8) ?? ""
@@ -41,12 +43,16 @@ struct PlaudAPI {
                 req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 req.httpBody = try JSONSerialization.data(withJSONObject: body)
             }
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await session.data(for: req)
             guard let http = resp as? HTTPURLResponse else { throw APIError.message("no HTTP response") }
             let json = try decodeEnvelope(http, data)
             let status = (json["status"] as? Int) ?? (json["code"] as? Int)
             if status == -302, let domains = (json["data"] as? [String: Any])?["domains"] as? [String: Any],
                let api = domains["api"] as? String {
+                // The token goes to this host next, so only a Plaud host over HTTPS is followed.
+                guard PlaudAPI.isPlaudHost(api) else {
+                    throw APIError.message("refused a region redirect to \(api): not an https plaud.ai host")
+                }
                 currentHost = api
                 continue
             }
@@ -86,6 +92,13 @@ struct PlaudAPI {
                    "aws:eu-central-1": "euc1", "aws:us-west-2": "usw2"]
         if let sub = map[region] { return "https://api-\(sub).plaud.ai" }
         return "https://api.plaud.ai"
+    }
+
+    // True for https://plaud.ai and https://<anything>.plaud.ai, with no user info in the URL.
+    static func isPlaudHost(_ base: String) -> Bool {
+        guard let c = URLComponents(string: base), c.scheme?.lowercased() == "https",
+              c.user == nil, c.password == nil, let host = c.host?.lowercased() else { return false }
+        return host == "plaud.ai" || host.hasSuffix(".plaud.ai")
     }
 
     // The `sub` claim is the user_id, which is also the BLE bind token.
